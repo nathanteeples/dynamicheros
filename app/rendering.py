@@ -3,10 +3,10 @@ from __future__ import annotations
 import math
 import os
 import random
-import shutil
 import subprocess
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -35,6 +35,13 @@ class RenderResult:
     seed_used: int
     ffmpeg_command: list[str]
     render_seconds: float
+
+
+@dataclass(slots=True)
+class RowLayer:
+    band: Image.Image
+    loop_width: int
+    y: int
 
 
 class HeroRenderer:
@@ -111,10 +118,7 @@ class HeroRenderer:
         seed_used = self._resolve_seed(service, seed_override)
         rng = random.Random(seed_used)
 
-        work_dir = self.cache_dir / "work" / f"{service.slug}-{uuid.uuid4().hex}"
-        work_dir.mkdir(parents=True, exist_ok=True)
-
-        tiles = [self._prepare_tile(path, card_width, card_height, service.corner_radius) for path in image_paths]
+        tiles = self._prepare_tiles(image_paths, card_width, card_height, service.corner_radius)
         rng.shuffle(tiles)
         log(f"Prepared {len(tiles)} pre-scaled 16:9 tiles for rendering")
 
@@ -122,15 +126,24 @@ class HeroRenderer:
         pitch = card_width + service.gap
         cards_per_row = max(8, min(14, math.ceil((service.output_width * 1.25) / pitch)))
         row_step = scene_height / service.row_count
-        strips = self._build_row_strips(tiles, service.row_count, cards_per_row, pitch, card_height, rng)
-        phases = [rng.randrange(max(1, strip.width)) for strip in strips]
+        row_layers = self._build_row_layers(
+            tiles=tiles,
+            row_count=service.row_count,
+            cards_per_row=cards_per_row,
+            pitch=pitch,
+            card_height=card_height,
+            row_step=row_step,
+            scene_width=scene_width,
+        )
+        phases = [rng.randrange(max(1, row.loop_width)) for row in row_layers]
 
         frame_count = service.loop_duration_seconds * service.fps
         if frame_count <= 0:
             raise RuntimeError("Frame count must be greater than 0")
 
-        temp_video_path = self.output_dir / f".{service.slug}.{uuid.uuid4().hex}.webm"
-        temp_thumbnail_path = self.output_dir / f".{service.slug}.{uuid.uuid4().hex}.jpg"
+        temp_dir = final_video_path.parent
+        temp_video_path = temp_dir / f".{service.slug}.{uuid.uuid4().hex}.webm"
+        temp_thumbnail_path = temp_dir / f".{service.slug}.{uuid.uuid4().hex}.jpg"
 
         crf = service.crf or QUALITY_PRESET_TO_CRF.get(service.quality_preset, 34)
         ffmpeg_command = self._ffmpeg_command(service, temp_video_path, crf)
@@ -150,9 +163,7 @@ class HeroRenderer:
                     service=service,
                     scene_width=scene_width,
                     scene_height=scene_height,
-                    row_step=row_step,
-                    card_height=card_height,
-                    strips=strips,
+                    row_layers=row_layers,
                     phases=phases,
                     frame_index=frame_index,
                     frame_count=frame_count,
@@ -206,7 +217,6 @@ class HeroRenderer:
         finally:
             if process and process.stdin:
                 process.stdin.close()
-            shutil.rmtree(work_dir, ignore_errors=True)
             if temp_video_path.exists():
                 temp_video_path.unlink(missing_ok=True)
             if temp_thumbnail_path.exists():
@@ -223,14 +233,13 @@ class HeroRenderer:
         preview_width = min(service.output_width, 960)
         preview_height = max(1, int(round(preview_width * service.output_height / max(1, service.output_width))))
         scale = preview_width / max(1, service.output_width)
-        preview_duration = max(4, min(10, service.loop_duration_seconds))
         preview_fps = max(12, min(18, service.fps))
 
         return service.model_copy(
             update={
                 "output_width": preview_width,
                 "output_height": preview_height,
-                "loop_duration_seconds": preview_duration,
+                "loop_duration_seconds": service.loop_duration_seconds,
                 "fps": preview_fps,
                 "card_width": max(120, int(round(service.card_width * scale))),
                 "gap": max(0, int(round(service.gap * scale))),
@@ -238,6 +247,25 @@ class HeroRenderer:
                 "cpu_used": min(8, max(service.cpu_used, 5)),
             }
         )
+
+    def _prepare_tiles(
+        self,
+        image_paths: list[Path],
+        card_width: int,
+        card_height: int,
+        corner_radius: int,
+    ) -> list[Image.Image]:
+        worker_count = max(1, min(len(image_paths), os.cpu_count() or 1))
+        if worker_count == 1:
+            return [self._prepare_tile(path, card_width, card_height, corner_radius) for path in image_paths]
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            return list(
+                executor.map(
+                    lambda path: self._prepare_tile(path, card_width, card_height, corner_radius),
+                    image_paths,
+                )
+            )
 
     def _prepare_tile(self, image_path: Path, card_width: int, card_height: int, corner_radius: int) -> Image.Image:
         with Image.open(image_path) as image:
@@ -278,40 +306,45 @@ class HeroRenderer:
         buffer_y = max(card_height * 2, int(service.output_height * 0.2 + service.output_width * skew_y + 120))
         return service.output_width + (buffer_x * 2), service.output_height + (buffer_y * 2)
 
-    def _build_row_strips(
+    def _build_row_layers(
         self,
         tiles: list[Image.Image],
         row_count: int,
         cards_per_row: int,
         pitch: int,
         card_height: int,
-        rng: random.Random,
-    ) -> list[Image.Image]:
-        strips: list[Image.Image] = []
+        row_step: float,
+        scene_width: int,
+    ) -> list[RowLayer]:
+        row_layers: list[RowLayer] = []
         total_tiles = len(tiles)
         if total_tiles == 0:
-            return strips
+            return row_layers
 
         for row_index in range(row_count):
             strip = Image.new("RGBA", (cards_per_row * pitch, card_height), (0, 0, 0, 0))
             row_offset = (row_index * cards_per_row) % total_tiles
+            reverse_order = row_index % 2 == 1
             for card_index in range(cards_per_row):
-                tile = tiles[(row_offset + card_index) % total_tiles]
+                source_index = cards_per_row - 1 - card_index if reverse_order else card_index
+                tile = tiles[(row_offset + source_index) % total_tiles]
                 x = card_index * pitch
                 strip.alpha_composite(tile, (x, 0))
-            if rng.random() > 0.5:
-                strip = strip.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-            strips.append(strip)
-        return strips
+            loop_width = strip.width
+            repeat_count = math.ceil(scene_width / max(1, loop_width)) + 2
+            band = Image.new("RGBA", (repeat_count * loop_width, card_height), (0, 0, 0, 0))
+            for copy_index in range(repeat_count):
+                band.alpha_composite(strip, (copy_index * loop_width, 0))
+            y = int(round((row_step * row_index) + ((row_step - card_height) / 2)))
+            row_layers.append(RowLayer(band=band, loop_width=loop_width, y=y))
+        return row_layers
 
     def _render_frame(
         self,
         service: ServiceConfig,
         scene_width: int,
         scene_height: int,
-        row_step: float,
-        card_height: int,
-        strips: list[Image.Image],
+        row_layers: list[RowLayer],
         phases: list[int],
         frame_index: int,
         frame_count: int,
@@ -319,17 +352,13 @@ class HeroRenderer:
         scene = Image.new("RGBA", (scene_width, scene_height), (0, 0, 0, 255))
         progress = frame_index / frame_count
 
-        for row_index, strip in enumerate(strips):
-            loop_width = strip.width
+        for row_index, row_layer in enumerate(row_layers):
+            loop_width = row_layer.loop_width
             direction = 1 if row_index % 2 == 0 else -1
-            row_shift = direction * progress * loop_width
-            phase = phases[row_index] % max(1, loop_width)
-            base_x = -loop_width * 2 - int(round(row_shift)) - phase
-            copies = math.ceil(scene_width / max(1, loop_width)) + 5
-            y = int(round((row_step * row_index) + ((row_step - card_height) / 2)))
-            for copy_index in range(copies):
-                x = base_x + (copy_index * loop_width)
-                scene.paste(strip, (x, y), strip)
+            pixel_shift = int(round(progress * loop_width))
+            start_x = (phases[row_index] + (direction * pixel_shift)) % max(1, loop_width)
+            row_view = row_layer.band.crop((start_x, 0, start_x + scene_width, row_layer.band.height))
+            scene.paste(row_view, (0, row_layer.y), row_view)
 
         transformed = self._apply_global_transform(scene, service)
         left = max(0, (transformed.width - service.output_width) // 2)
@@ -415,6 +444,8 @@ class HeroRenderer:
                 [
                     "-c:v",
                     "libvpx",
+                    "-threads",
+                    str(max(1, os.cpu_count() or 1)),
                     "-pix_fmt",
                     "yuv420p",
                     "-crf",
@@ -426,13 +457,21 @@ class HeroRenderer:
         else:
             bitrate = service.target_bitrate_kbps or 0
             deadline = "good" if service.cpu_used <= 4 else "realtime"
+            cpu_threads = max(1, os.cpu_count() or 1)
+            tile_columns = 2 if cpu_threads >= 8 and service.output_width >= 1920 else 1 if cpu_threads >= 4 else 0
             command.extend(
                 [
                     "-c:v",
                     "libvpx-vp9",
+                    "-threads",
+                    str(cpu_threads),
                     "-pix_fmt",
                     "yuv420p",
                     "-row-mt",
+                    "1",
+                    "-tile-columns",
+                    str(tile_columns),
+                    "-frame-parallel",
                     "1",
                     "-crf",
                     str(max(4, min(63, crf))),

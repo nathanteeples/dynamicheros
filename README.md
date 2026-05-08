@@ -2,7 +2,7 @@
 
 Dynamic Heroes is a locally hosted Docker app that generates and serves seamless looping WebM hero backgrounds for streaming services using TMDB artwork. Each service keeps a stable URL such as `/heroes/netflix.webm`, while the file behind that URL can be regenerated on demand or on a configurable schedule.
 
-The web dashboard is manual-first by default. You can generate a lightweight draft preview clip before you commit to a full hosted WebM render, and automatic refresh stays off until you explicitly enable it.
+The web dashboard is manual-first by default. You can generate a lighter draft preview clip before you commit to a full hosted WebM render, and automatic refresh stays off until you explicitly enable it. Preview timing matches the final render so motion speed is reflected accurately.
 
 ## Features
 

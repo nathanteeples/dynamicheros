@@ -268,7 +268,7 @@ function previewStage(serviceView) {
           src="${serviceView.urls.preview_video}${previewCacheBust}"
         ></video>
       `,
-      note: "Preview uses the same server-side compositor at a lighter preview size. Render final to publish the stable hosted WebM.",
+      note: "Preview uses the same server-side compositor and motion timing at a lighter preview size. Render final to publish the stable hosted WebM.",
     };
   }
 
