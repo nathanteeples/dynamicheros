@@ -85,7 +85,7 @@ class HeroRenderer:
         preview_service = self._preview_service(service)
         preview_video_path = self.preview_dir / f"{service.slug}.webm"
         preview_thumbnail_path = self.preview_dir / f"{service.slug}.jpg"
-        preview_clip_duration_seconds = max(4, min(8, service.loop_duration_seconds))
+        preview_clip_duration_seconds = min(2, service.loop_duration_seconds)
         return self._render_variant(
             service=preview_service,
             image_paths=image_paths,
@@ -238,10 +238,10 @@ class HeroRenderer:
         return int(time.time() * 1000) % 2_147_483_647
 
     def _preview_service(self, service: ServiceConfig) -> ServiceConfig:
-        preview_width = min(service.output_width, 960)
+        preview_width = min(service.output_width, 720)
         preview_height = max(1, int(round(preview_width * service.output_height / max(1, service.output_width))))
         scale = preview_width / max(1, service.output_width)
-        preview_fps = max(12, min(18, service.fps))
+        preview_fps = 30
 
         return service.model_copy(
             update={
@@ -252,7 +252,9 @@ class HeroRenderer:
                 "card_width": max(120, int(round(service.card_width * scale))),
                 "gap": max(0, int(round(service.gap * scale))),
                 "corner_radius": max(0, int(round(service.corner_radius * scale))),
-                "cpu_used": min(8, max(service.cpu_used, 5)),
+                "codec": "vp8",
+                "cpu_used": 12,
+                "target_bitrate_kbps": min(1200, service.target_bitrate_kbps or 1200),
             }
         )
 
@@ -365,9 +367,9 @@ class HeroRenderer:
         for row_index, row_layer in enumerate(row_layers):
             loop_width = row_layer.loop_width
             direction = 1 if row_index % 2 == 0 else -1
-            pixel_shift = int(round(motion_progress * loop_width))
+            pixel_shift = motion_progress * loop_width
             start_x = (phases[row_index] + (direction * pixel_shift)) % max(1, loop_width)
-            row_view = row_layer.band.crop((start_x, 0, start_x + scene_width, row_layer.band.height))
+            row_view = self._subpixel_row_view(row_layer.band, start_x, scene_width)
             scene.paste(row_view, (0, row_layer.y), row_view)
 
         transformed = self._apply_global_transform(scene, service)
@@ -450,6 +452,7 @@ class HeroRenderer:
 
         if service.codec == "vp8":
             bitrate = service.target_bitrate_kbps or 2000
+            deadline = "good" if service.cpu_used <= 4 else "realtime"
             command.extend(
                 [
                     "-c:v",
@@ -458,17 +461,25 @@ class HeroRenderer:
                     str(max(1, os.cpu_count() or 1)),
                     "-pix_fmt",
                     "yuv420p",
+                    "-deadline",
+                    deadline,
+                    "-cpu-used",
+                    str(max(0, min(16, service.cpu_used))),
+                    "-lag-in-frames",
+                    "0",
                     "-crf",
                     str(max(4, min(63, crf))),
                     "-b:v",
                     f"{bitrate}k",
+                    "-g",
+                    "9999",
                 ]
             )
         else:
             bitrate = service.target_bitrate_kbps or 0
             deadline = "good" if service.cpu_used <= 4 else "realtime"
             cpu_threads = max(1, os.cpu_count() or 1)
-            tile_columns = 2 if cpu_threads >= 8 and service.output_width >= 1920 else 1 if cpu_threads >= 4 else 0
+            tile_columns = 2 if cpu_threads >= 8 and service.output_width >= 1280 else 1 if cpu_threads >= 4 and service.output_width >= 640 else 0
             command.extend(
                 [
                     "-c:v",
@@ -483,6 +494,8 @@ class HeroRenderer:
                     str(tile_columns),
                     "-frame-parallel",
                     "1",
+                    "-lag-in-frames",
+                    "0",
                     "-crf",
                     str(max(4, min(63, crf))),
                     "-b:v",
@@ -498,3 +511,20 @@ class HeroRenderer:
 
         command.append(str(output_path))
         return command
+
+    def _subpixel_row_view(self, band: Image.Image, start_x: float, output_width: int) -> Image.Image:
+        base_x = int(math.floor(start_x))
+        fractional_x = start_x - base_x
+        height = band.height
+
+        if fractional_x <= 0.001:
+            return band.crop((base_x, 0, base_x + output_width, height))
+
+        window = band.crop((base_x, 0, base_x + output_width + 2, height))
+        return window.transform(
+            (output_width, height),
+            Image.Transform.AFFINE,
+            (1.0, 0.0, fractional_x, 0.0, 1.0, 0.0),
+            resample=Image.Resampling.BICUBIC,
+            fillcolor=(0, 0, 0, 0),
+        )

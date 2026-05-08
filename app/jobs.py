@@ -271,13 +271,14 @@ class GenerationManager:
                 image_cache_dir=self.repository.cache_dir / "images",
                 global_settings=self.settings.global_settings,
             )
-            titles, artworks = tmdb_client.collect_artworks(service, progress, log)
-            if len(artworks) < service.minimum_usable_images:
-                raise RuntimeError(
-                    f"Only {len(artworks)} artwork images found; minimum required is {service.minimum_usable_images}"
-                )
-
-            image_paths = tmdb_client.download_artworks(artworks, progress, log)
+            title_count, image_paths = self._resolve_render_inputs(
+                slug,
+                service,
+                self.settings.global_settings,
+                tmdb_client,
+                progress,
+                log,
+            )
             render_result = self.renderer.render(
                 service,
                 image_paths,
@@ -298,7 +299,7 @@ class GenerationManager:
             service_state.file_size_bytes = render_result.file_size_bytes
             service_state.thumbnail_size_bytes = render_result.thumbnail_size_bytes
             service_state.duration_seconds = render_result.duration_seconds
-            service_state.title_count = len(titles)
+            service_state.title_count = title_count
             service_state.image_count = len(image_paths)
             service_state.output_width = service.output_width
             service_state.output_height = service.output_height
@@ -369,6 +370,62 @@ class GenerationManager:
         payload = json.dumps(service.model_dump(mode="json"), sort_keys=True)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    def _artwork_input_hash(self, service: ServiceConfig, global_settings: GlobalSettings) -> str:
+        payload = {
+            "provider_id": service.provider_id,
+            "region": service.region,
+            "content_mode": service.content_mode,
+            "artwork_mode": service.artwork_mode,
+            "max_titles": service.max_titles,
+            "max_artwork_images": service.max_artwork_images,
+            "minimum_usable_images": service.minimum_usable_images,
+            "pages_per_media_type": global_settings.pages_per_media_type,
+            "tmdb_language": global_settings.tmdb_language,
+            "image_size": global_settings.image_size,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _artwork_manifest_path(self, slug: str, artwork_hash: str) -> Path:
+        return self.repository.cache_dir / "work" / f"{slug}.{artwork_hash}.json"
+
+    def _load_cached_artwork_manifest(
+        self,
+        slug: str,
+        artwork_hash: str,
+        minimum_usable_images: int,
+    ) -> tuple[int, list[Path]] | None:
+        manifest_path = self._artwork_manifest_path(slug, artwork_hash)
+        if not manifest_path.exists():
+            return None
+
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+
+        image_paths = [Path(path) for path in payload.get("image_paths", [])]
+        existing_paths = [path for path in image_paths if path.exists() and path.stat().st_size > 0]
+        if len(existing_paths) < minimum_usable_images:
+            return None
+
+        title_count = int(payload.get("title_count") or len(existing_paths))
+        return title_count, existing_paths
+
+    def _save_cached_artwork_manifest(
+        self,
+        slug: str,
+        artwork_hash: str,
+        title_count: int,
+        image_paths: list[Path],
+    ) -> None:
+        manifest_path = self._artwork_manifest_path(slug, artwork_hash)
+        payload = {
+            "title_count": title_count,
+            "image_paths": [str(path) for path in image_paths],
+            "updated_at": utc_now().isoformat(),
+        }
+        manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
     def _preferred_seed_for_render(
         self,
         service: ServiceConfig,
@@ -380,6 +437,33 @@ class GenerationManager:
         if service_state.preview_settings_hash == settings_hash and service_state.preview_seed_used is not None:
             return service_state.preview_seed_used
         return None
+
+    def _resolve_render_inputs(
+        self,
+        slug: str,
+        service: ServiceConfig,
+        global_settings: GlobalSettings,
+        tmdb_client: TmdbClient,
+        progress: Callable[[float, str], None],
+        log: Callable[[str], None],
+    ) -> tuple[int, list[Path]]:
+        artwork_hash = self._artwork_input_hash(service, global_settings)
+        cached_manifest = self._load_cached_artwork_manifest(slug, artwork_hash, service.minimum_usable_images)
+        if cached_manifest is not None:
+            title_count, image_paths = cached_manifest
+            progress(55.0, f"Reused {len(image_paths)} cached artwork files")
+            log(f"Reused cached artwork manifest with {len(image_paths)} image files")
+            return title_count, image_paths
+
+        titles, artworks = tmdb_client.collect_artworks(service, progress, log)
+        if len(artworks) < service.minimum_usable_images:
+            raise RuntimeError(
+                f"Only {len(artworks)} artwork images found; minimum required is {service.minimum_usable_images}"
+            )
+
+        image_paths = tmdb_client.download_artworks(artworks, progress, log)
+        self._save_cached_artwork_manifest(slug, artwork_hash, len(titles), image_paths)
+        return len(titles), image_paths
 
     def _effective_next_scheduled_at(self, service: ServiceConfig, state: ServiceState | None) -> datetime | None:
         if not state:
@@ -403,6 +487,32 @@ class GenerationManager:
             raise RuntimeError("This service is already rendering. Wait for the current job to finish.")
 
         service_state = self._ensure_service_state(slug)
+        settings_hash = self._settings_hash(service)
+        preview_path = self.repository.previews_dir / f"{slug}.webm"
+        preview_thumbnail_path = self.repository.previews_dir / f"{slug}.jpg"
+        if (
+            service_state.preview_settings_hash == settings_hash
+            and preview_path.exists()
+            and preview_path.stat().st_size > 0
+        ):
+            service_state.preview_status = "succeeded"
+            service_state.preview_progress = 100.0
+            service_state.preview_message = "Using cached preview"
+            service_state.preview_output_path = str(preview_path)
+            service_state.preview_thumbnail_path = str(preview_thumbnail_path) if preview_thumbnail_path.exists() else None
+            service_state.preview_file_size_bytes = preview_path.stat().st_size
+            service_state.preview_thumbnail_size_bytes = (
+                preview_thumbnail_path.stat().st_size if preview_thumbnail_path.exists() else None
+            )
+            service_state.preview_generated_at = service_state.preview_generated_at or datetime.fromtimestamp(
+                preview_path.stat().st_mtime,
+                tz=UTC,
+            )
+            service_state.preview_updated_at = utc_now()
+            self.repository.save_state(self.state)
+            self.log_store.append(slug, "info", "Reused cached preview", output_path=str(preview_path))
+            return self._preview_response(slug, service_state)
+
         started_at = utc_now()
         with self._job_lock:
             self._preview_inflight_slugs.add(slug)
@@ -415,6 +525,7 @@ class GenerationManager:
 
         self.log_store.append(slug, "info", "Starting preview generation")
         tmdb_client: TmdbClient | None = None
+        preview_log = self._preview_logger(slug)
 
         try:
             api_key, bearer_token = self._resolved_tmdb_credentials(global_settings)
@@ -434,20 +545,20 @@ class GenerationManager:
                     service_state.preview_updated_at = utc_now()
 
             preview_progress(0.0, "Starting preview generation")
-            titles, artworks = tmdb_client.collect_artworks(service, preview_progress, self._preview_logger(slug))
-            if len(artworks) < service.minimum_usable_images:
-                raise RuntimeError(
-                    f"Only {len(artworks)} artwork images found; minimum required is {service.minimum_usable_images}"
-                )
-
-            image_paths = tmdb_client.download_artworks(artworks, preview_progress, self._preview_logger(slug))
-            settings_hash = self._settings_hash(service)
+            title_count, image_paths = self._resolve_render_inputs(
+                slug,
+                service,
+                global_settings,
+                tmdb_client,
+                preview_progress,
+                preview_log,
+            )
             preview_seed = self._preferred_seed_for_render(service, service_state, settings_hash)
             render_result = self.renderer.render_preview(
                 service,
                 image_paths,
                 preview_progress,
-                self._preview_logger(slug),
+                preview_log,
                 seed_override=preview_seed,
             )
             completed_at = utc_now()
@@ -462,7 +573,7 @@ class GenerationManager:
             service_state.preview_file_size_bytes = render_result.file_size_bytes
             service_state.preview_thumbnail_size_bytes = render_result.thumbnail_size_bytes
             service_state.preview_duration_seconds = render_result.duration_seconds
-            service_state.preview_title_count = len(titles)
+            service_state.preview_title_count = title_count
             service_state.preview_image_count = len(image_paths)
             service_state.preview_settings_hash = settings_hash
             service_state.preview_settings_snapshot = service.model_dump(mode="json")
@@ -490,6 +601,9 @@ class GenerationManager:
             with self._job_lock:
                 self._preview_inflight_slugs.discard(slug)
 
+        return self._preview_response(slug, service_state)
+
+    def _preview_response(self, slug: str, service_state: ServiceState) -> dict[str, Any]:
         return {
             "preview": {
                 "status": service_state.preview_status,

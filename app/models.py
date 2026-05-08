@@ -16,11 +16,11 @@ JobStatus = Literal["idle", "queued", "running", "succeeded", "failed"]
 class RenderDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    output_width: int = 1920
-    output_height: int = 1080
+    output_width: int = 1280
+    output_height: int = 720
     loop_duration_seconds: int = 90
     fps: int = 30
-    card_width: int = 360
+    card_width: int = 300
     gap: int = 14
     row_count: int = 6
     corner_radius: int = 12
@@ -33,7 +33,7 @@ class RenderDefaults(BaseModel):
     codec: VideoCodec = "vp9"
     quality_preset: QualityPreset = "balanced"
     crf: int = 34
-    cpu_used: int = 4
+    cpu_used: int = 6
     target_bitrate_kbps: int | None = None
     max_titles: int = 120
     max_artwork_images: int = 72

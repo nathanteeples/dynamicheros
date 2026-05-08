@@ -135,10 +135,11 @@ Important files:
 
 ## Quality guidance
 
-Recommended defaults for 1080p backgrounds:
+Recommended defaults for faster hero backgrounds:
 
 - Codec: VP9
-- FPS: 24 or 30
+- Resolution: 1280x720
+- FPS: 30
 - Loop duration: 90 seconds
 - CRF: 34 for balanced output
 - CRF: 38 for smaller files
