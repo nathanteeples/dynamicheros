@@ -1,6 +1,8 @@
 services:
   hero-wall:
     build: .
+    init: true
+    shm_size: "2gb"
     ports:
       - "8080:8080"
     environment:

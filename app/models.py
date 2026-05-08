@@ -33,7 +33,7 @@ class RenderDefaults(BaseModel):
     codec: VideoCodec = "vp9"
     quality_preset: QualityPreset = "balanced"
     crf: int = 34
-    cpu_used: int = 6
+    cpu_used: int = 8
     target_bitrate_kbps: int | None = None
     max_titles: int = 120
     max_artwork_images: int = 72
@@ -126,7 +126,7 @@ class GlobalSettings(BaseModel):
     api_cache_ttl_minutes: int = 360
     image_size: str = "w1280"
     scheduler_poll_seconds: int = 60
-    max_concurrent_jobs: int = 2
+    max_concurrent_jobs: int = 1
     failure_retry_minutes: int = 30
     global_defaults: RenderDefaults = Field(default_factory=RenderDefaults)
 

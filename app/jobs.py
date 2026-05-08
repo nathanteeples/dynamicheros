@@ -12,6 +12,7 @@ from typing import Any, Callable
 from app.models import AppSettings, AppState, GlobalSettings, JobState, PreviewRequest, ServiceConfig, ServiceState
 from app.persistence import AppRepository
 from app.rendering import HeroRenderer
+from app.runtime_resources import recommended_parallel_jobs
 from app.tmdb import TmdbClient
 
 
@@ -89,7 +90,7 @@ class GenerationManager:
         self._stopping = False
         self._hydrate_existing_outputs()
 
-        worker_count = self.settings.global_settings.max_concurrent_jobs
+        worker_count = max(1, min(self.settings.global_settings.max_concurrent_jobs, recommended_parallel_jobs()))
         self._worker_tasks = [asyncio.create_task(self._worker_loop()) for _ in range(worker_count)]
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
 

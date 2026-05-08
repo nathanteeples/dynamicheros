@@ -4,6 +4,8 @@ Dynamic Heroes is a locally hosted Docker app that generates and serves seamless
 
 The web dashboard is manual-first by default. You can generate a lighter draft preview clip before you commit to a full hosted WebM render, and automatic refresh stays off until you explicitly enable it. Preview timing matches the final render so motion speed is reflected accurately.
 
+The renderer auto-detects the CPUs and memory visible inside the container and splits them between frame compositing and ffmpeg encoding. The Compose file intentionally does not cap CPU or memory, so the app uses the full resource budget Docker exposes to it.
+
 ## Features
 
 - Stable hosted WebM and thumbnail URLs per streaming service
@@ -144,6 +146,13 @@ Recommended defaults for faster hero backgrounds:
 - CRF: 34 for balanced output
 - CRF: 38 for smaller files
 - Lower motion density or fewer unique cards if output size is too large
+
+## Docker resources
+
+- `docker-compose.yml` does not set CPU or memory limits, so the container can use everything Docker makes available.
+- The app auto-detects visible CPUs and cgroup memory and uses that to size render workers, ffmpeg threads, and the effective job concurrency.
+- The dashboard's max concurrent jobs setting is treated as an upper bound, and the runtime may choose a lower number when that will finish renders faster on the detected machine.
+- On Docker Desktop, the Docker Desktop resource settings are still the outer ceiling. If Docker is limited to 4 CPUs there, the container can only use those 4.
 
 ## Local development without Docker
 

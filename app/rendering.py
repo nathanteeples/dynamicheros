@@ -14,6 +14,7 @@ from typing import Callable
 from PIL import Image, ImageDraw
 
 from app.models import ServiceConfig
+from app.runtime_resources import available_cpu_count, available_memory_bytes
 
 
 QUALITY_PRESET_TO_CRF = {
@@ -42,6 +43,14 @@ class RowLayer:
     band: Image.Image
     loop_width: int
     y: int
+
+
+@dataclass(slots=True)
+class RenderResourcePlan:
+    cpu_count: int
+    memory_bytes: int | None
+    render_workers: int
+    ffmpeg_threads: int
 
 
 class HeroRenderer:
@@ -147,13 +156,24 @@ class HeroRenderer:
         frame_count = output_duration * service.fps
         if frame_count <= 0:
             raise RuntimeError("Frame count must be greater than 0")
+        resource_plan = self._resource_plan(service, frame_count)
+        memory_gib = (
+            f"{resource_plan.memory_bytes / float(1024**3):.1f} GiB"
+            if resource_plan.memory_bytes is not None
+            else "unknown"
+        )
+        log(
+            "Resource plan: "
+            f"{resource_plan.cpu_count} CPUs visible, {memory_gib} memory, "
+            f"{resource_plan.render_workers} render workers, {resource_plan.ffmpeg_threads} ffmpeg threads"
+        )
 
         temp_dir = final_video_path.parent
         temp_video_path = temp_dir / f".{service.slug}.{uuid.uuid4().hex}.webm"
         temp_thumbnail_path = temp_dir / f".{service.slug}.{uuid.uuid4().hex}.jpg"
 
         crf = service.crf or QUALITY_PRESET_TO_CRF.get(service.quality_preset, 34)
-        ffmpeg_command = self._ffmpeg_command(service, temp_video_path, crf)
+        ffmpeg_command = self._ffmpeg_command(service, temp_video_path, crf, resource_plan.ffmpeg_threads)
         log(f"ffmpeg command: {' '.join(ffmpeg_command)}")
 
         process: subprocess.Popen[bytes] | None = None
@@ -165,17 +185,16 @@ class HeroRenderer:
                 stderr=subprocess.PIPE,
             )
             thumbnail_written = False
-            for frame_index in range(frame_count):
-                frame = self._render_frame(
-                    service=service,
-                    scene_width=scene_width,
-                    scene_height=scene_height,
-                    row_layers=row_layers,
-                    phases=phases,
-                    frame_index=frame_index,
-                    frame_count=frame_count,
-                    motion_duration_seconds=motion_duration,
-                )
+            for frame_index, frame in self._iter_rendered_frames(
+                service=service,
+                scene_width=scene_width,
+                scene_height=scene_height,
+                row_layers=row_layers,
+                phases=phases,
+                frame_count=frame_count,
+                motion_duration_seconds=motion_duration,
+                render_workers=resource_plan.render_workers,
+            ):
                 if not thumbnail_written:
                     frame.save(temp_thumbnail_path, format="JPEG", quality=90, optimize=True)
                     thumbnail_written = True
@@ -253,7 +272,7 @@ class HeroRenderer:
                 "gap": max(0, int(round(service.gap * scale))),
                 "corner_radius": max(0, int(round(service.corner_radius * scale))),
                 "codec": "vp8",
-                "cpu_used": 12,
+                "cpu_used": 10,
                 "target_bitrate_kbps": min(1200, service.target_bitrate_kbps or 1200),
             }
         )
@@ -265,7 +284,7 @@ class HeroRenderer:
         card_height: int,
         corner_radius: int,
     ) -> list[Image.Image]:
-        worker_count = max(1, min(len(image_paths), os.cpu_count() or 1))
+        worker_count = max(1, min(len(image_paths), available_cpu_count()))
         if worker_count == 1:
             return [self._prepare_tile(path, card_width, card_height, corner_radius) for path in image_paths]
 
@@ -369,7 +388,13 @@ class HeroRenderer:
             direction = 1 if row_index % 2 == 0 else -1
             pixel_shift = motion_progress * loop_width
             start_x = (phases[row_index] + (direction * pixel_shift)) % max(1, loop_width)
-            row_view = self._subpixel_row_view(row_layer.band, start_x, scene_width)
+            pixels_per_frame = direction * (loop_width / max(1.0, motion_duration_seconds * service.fps))
+            row_view = self._motion_sampled_row_view(
+                row_layer.band,
+                start_x,
+                scene_width,
+                pixels_per_frame,
+            )
             scene.paste(row_view, (0, row_layer.y), row_view)
 
         transformed = self._apply_global_transform(scene, service)
@@ -431,7 +456,13 @@ class HeroRenderer:
             return service.skew_y
         return math.tan(math.radians(service.rotate_x)) * 0.08
 
-    def _ffmpeg_command(self, service: ServiceConfig, output_path: Path, crf: int) -> list[str]:
+    def _ffmpeg_command(
+        self,
+        service: ServiceConfig,
+        output_path: Path,
+        crf: int,
+        ffmpeg_threads: int,
+    ) -> list[str]:
         command = [
             self.ffmpeg_binary,
             "-y",
@@ -458,7 +489,7 @@ class HeroRenderer:
                     "-c:v",
                     "libvpx",
                     "-threads",
-                    str(max(1, os.cpu_count() or 1)),
+                    str(ffmpeg_threads),
                     "-pix_fmt",
                     "yuv420p",
                     "-deadline",
@@ -478,14 +509,13 @@ class HeroRenderer:
         else:
             bitrate = service.target_bitrate_kbps or 0
             deadline = "good" if service.cpu_used <= 4 else "realtime"
-            cpu_threads = max(1, os.cpu_count() or 1)
-            tile_columns = 2 if cpu_threads >= 8 and service.output_width >= 1280 else 1 if cpu_threads >= 4 and service.output_width >= 640 else 0
+            tile_columns = 2 if ffmpeg_threads >= 4 and service.output_width >= 1280 else 1 if ffmpeg_threads >= 2 and service.output_width >= 640 else 0
             command.extend(
                 [
                     "-c:v",
                     "libvpx-vp9",
                     "-threads",
-                    str(cpu_threads),
+                    str(ffmpeg_threads),
                     "-pix_fmt",
                     "yuv420p",
                     "-row-mt",
@@ -512,6 +542,115 @@ class HeroRenderer:
         command.append(str(output_path))
         return command
 
+    def _resource_plan(self, service: ServiceConfig, frame_count: int) -> RenderResourcePlan:
+        cpu_count = available_cpu_count()
+        memory_bytes = available_memory_bytes()
+        render_ceiling = max(1, cpu_count - 2) if cpu_count >= 4 else max(1, cpu_count - 1)
+
+        if frame_count <= max(90, service.fps * 3):
+            target_render_workers = min(render_ceiling, 4)
+        else:
+            target_render_workers = min(render_ceiling, 10 if service.output_width * service.output_height <= 1280 * 720 else 8)
+
+        if memory_bytes is None:
+            render_workers = max(1, target_render_workers)
+        else:
+            reserve_bytes = 768 * 1024 * 1024
+            usable_bytes = max(256 * 1024 * 1024, memory_bytes - reserve_bytes)
+            estimated_worker_bytes = max(
+                96 * 1024 * 1024,
+                int(service.output_width * service.output_height * 20),
+            )
+            memory_limited_workers = max(1, usable_bytes // estimated_worker_bytes)
+            render_workers = max(1, min(target_render_workers, memory_limited_workers))
+
+        ffmpeg_threads = max(1, cpu_count - render_workers)
+        return RenderResourcePlan(
+            cpu_count=cpu_count,
+            memory_bytes=memory_bytes,
+            render_workers=render_workers,
+            ffmpeg_threads=ffmpeg_threads,
+        )
+
+    def _iter_rendered_frames(
+        self,
+        service: ServiceConfig,
+        scene_width: int,
+        scene_height: int,
+        row_layers: list[RowLayer],
+        phases: list[int],
+        frame_count: int,
+        motion_duration_seconds: int,
+        render_workers: int,
+    ):
+        if render_workers <= 1 or frame_count <= max(30, service.fps):
+            for frame_index in range(frame_count):
+                yield frame_index, self._render_frame(
+                    service=service,
+                    scene_width=scene_width,
+                    scene_height=scene_height,
+                    row_layers=row_layers,
+                    phases=phases,
+                    frame_index=frame_index,
+                    frame_count=frame_count,
+                    motion_duration_seconds=motion_duration_seconds,
+                )
+            return
+
+        max_inflight = max(4, render_workers * 2)
+        with ThreadPoolExecutor(max_workers=render_workers) as executor:
+            next_to_schedule = 0
+            pending = {}
+
+            while next_to_schedule < min(frame_count, max_inflight):
+                pending[next_to_schedule] = executor.submit(
+                    self._render_frame,
+                    service=service,
+                    scene_width=scene_width,
+                    scene_height=scene_height,
+                    row_layers=row_layers,
+                    phases=phases,
+                    frame_index=next_to_schedule,
+                    frame_count=frame_count,
+                    motion_duration_seconds=motion_duration_seconds,
+                )
+                next_to_schedule += 1
+
+            next_to_write = 0
+            while next_to_write < frame_count:
+                future = pending.pop(next_to_write)
+                frame = future.result()
+                while next_to_schedule < frame_count and len(pending) < max_inflight:
+                    pending[next_to_schedule] = executor.submit(
+                        self._render_frame,
+                        service=service,
+                        scene_width=scene_width,
+                        scene_height=scene_height,
+                        row_layers=row_layers,
+                        phases=phases,
+                        frame_index=next_to_schedule,
+                        frame_count=frame_count,
+                        motion_duration_seconds=motion_duration_seconds,
+                    )
+                    next_to_schedule += 1
+                yield next_to_write, frame
+                next_to_write += 1
+
+    def _motion_sampled_row_view(
+        self,
+        band: Image.Image,
+        start_x: float,
+        output_width: int,
+        pixels_per_frame: float,
+    ) -> Image.Image:
+        if abs(pixels_per_frame) >= 0.85:
+            return self._subpixel_row_view(band, start_x, output_width)
+
+        offset = pixels_per_frame * 0.5
+        leading = self._subpixel_row_view(band, start_x - offset, output_width)
+        trailing = self._subpixel_row_view(band, start_x + offset, output_width)
+        return Image.blend(leading, trailing, 0.5)
+
     def _subpixel_row_view(self, band: Image.Image, start_x: float, output_width: int) -> Image.Image:
         base_x = int(math.floor(start_x))
         fractional_x = start_x - base_x
@@ -520,11 +659,6 @@ class HeroRenderer:
         if fractional_x <= 0.001:
             return band.crop((base_x, 0, base_x + output_width, height))
 
-        window = band.crop((base_x, 0, base_x + output_width + 2, height))
-        return window.transform(
-            (output_width, height),
-            Image.Transform.AFFINE,
-            (1.0, 0.0, fractional_x, 0.0, 1.0, 0.0),
-            resample=Image.Resampling.BICUBIC,
-            fillcolor=(0, 0, 0, 0),
-        )
+        left = band.crop((base_x, 0, base_x + output_width, height))
+        right = band.crop((base_x + 1, 0, base_x + output_width + 1, height))
+        return Image.blend(left, right, fractional_x)

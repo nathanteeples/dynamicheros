@@ -4,7 +4,8 @@ import json
 import threading
 from pathlib import Path
 
-from app.models import AppSettings, AppState, GlobalSettings, ServiceConfig
+from app.models import AppSettings, AppState, GlobalSettings, RenderDefaults, ServiceConfig
+from app.runtime_resources import recommended_parallel_jobs, recommended_vp9_cpu_used
 from app.service_catalog import DEFAULT_SERVICE_DEFINITIONS
 
 
@@ -36,7 +37,11 @@ class AppRepository:
             path.mkdir(parents=True, exist_ok=True)
 
     def build_default_settings(self) -> AppSettings:
-        global_settings = GlobalSettings(default_region=self.default_region)
+        global_settings = GlobalSettings(
+            default_region=self.default_region,
+            max_concurrent_jobs=recommended_parallel_jobs(),
+            global_defaults=RenderDefaults(cpu_used=recommended_vp9_cpu_used()),
+        )
         defaults = global_settings.global_defaults
         services = [
             ServiceConfig(
@@ -82,6 +87,7 @@ class AppRepository:
 
             data = json.loads(self.settings_path.read_text(encoding="utf-8"))
             settings = AppSettings.model_validate(data)
+            changed = self._apply_runtime_default_migrations(settings)
 
             existing = {service.slug: service for service in settings.services}
             for entry in DEFAULT_SERVICE_DEFINITIONS:
@@ -98,6 +104,8 @@ class AppRepository:
                     )
                 )
             settings.services.sort(key=lambda service: service.name.lower())
+            if changed:
+                self.save_settings(settings)
             return settings
 
     def save_settings(self, settings: AppSettings) -> None:
@@ -122,3 +130,63 @@ class AppRepository:
                 json.dumps(state.model_dump(mode="json"), indent=2),
                 encoding="utf-8",
             )
+
+    def _apply_runtime_default_migrations(self, settings: AppSettings) -> bool:
+        changed = False
+        recommended_cpu_used = recommended_vp9_cpu_used()
+
+        defaults = settings.global_settings.global_defaults
+        if self._matches_legacy_render_defaults(defaults):
+            self._apply_render_speed_defaults(defaults, recommended_cpu_used)
+            changed = True
+        elif self._matches_current_stock_defaults(defaults) and defaults.cpu_used != recommended_cpu_used:
+            defaults.cpu_used = recommended_cpu_used
+            changed = True
+
+        for service in settings.services:
+            if self._matches_legacy_render_defaults(service):
+                self._apply_render_speed_defaults(service, recommended_cpu_used)
+                changed = True
+                continue
+            if self._matches_current_stock_defaults(service) and service.cpu_used != recommended_cpu_used:
+                service.cpu_used = recommended_cpu_used
+                changed = True
+
+        return changed
+
+    def _matches_legacy_render_defaults(self, item: RenderDefaults) -> bool:
+        return (
+            item.output_width == 1920
+            and item.output_height == 1080
+            and item.fps == 30
+            and item.card_width == 360
+            and item.gap == 14
+            and item.row_count == 6
+            and item.corner_radius == 12
+            and item.rotate_z == -6.0
+            and item.zoom == 1.0
+            and item.crf == 34
+            and item.cpu_used == 4
+        )
+
+    def _matches_current_stock_defaults(self, item: RenderDefaults) -> bool:
+        return (
+            item.output_width == 1280
+            and item.output_height == 720
+            and item.fps == 30
+            and item.card_width == 300
+            and item.gap == 14
+            and item.row_count == 6
+            and item.corner_radius == 12
+            and item.rotate_z == -6.0
+            and item.zoom == 1.0
+            and item.crf == 34
+            and item.cpu_used in {6, 7, 8}
+        )
+
+    def _apply_render_speed_defaults(self, item: RenderDefaults, cpu_used: int) -> None:
+        item.output_width = 1280
+        item.output_height = 720
+        item.fps = 30
+        item.card_width = 300
+        item.cpu_used = cpu_used
