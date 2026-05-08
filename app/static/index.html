@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dynamic Heroes</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero-header">
+        <div>
+          <p class="eyebrow">Local Docker Admin</p>
+          <h1>Dynamic streaming hero backgrounds</h1>
+          <p class="subtitle">
+            TMDB-powered seamless WebM loops with stable URLs, server-side rendering, and hosted previews from the real output files.
+          </p>
+        </div>
+        <div class="header-actions">
+          <button id="refresh-button" class="secondary-button" type="button">Refresh</button>
+          <button id="regenerate-all-button" class="secondary-button" type="button">Regenerate all</button>
+          <button id="save-button" class="primary-button" type="button">Save settings</button>
+        </div>
+      </header>
+
+      <section class="panel panel-grid">
+        <div>
+          <p class="panel-label">System status</p>
+          <div id="status-summary" class="status-summary"></div>
+        </div>
+        <div class="status-inline">
+          <div>
+            <p class="panel-label">Stable asset pattern</p>
+            <code>/heroes/&lt;service-slug&gt;.webm</code>
+          </div>
+          <div>
+            <p class="panel-label">Preview source</p>
+            <code>Exact generated WebM file</code>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-label">Global settings</p>
+            <h2>TMDB, scheduler, and default render values</h2>
+          </div>
+          <p class="panel-note">
+            Environment variables override stored TMDB credentials. Global defaults seed new service configs and act as a baseline reference while each service keeps its own editable values.
+          </p>
+        </div>
+
+        <form id="global-settings-form" class="settings-grid"></form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-label">Service dashboard</p>
+            <h2>Generated hero loops</h2>
+          </div>
+          <p class="panel-note">
+            Each preview player below loads the same stable asset URL your downstream app will consume.
+          </p>
+        </div>
+        <div id="services-grid" class="services-grid"></div>
+      </section>
+    </div>
+
+    <template id="log-line-template">
+      <div class="log-line">
+        <span class="log-time"></span>
+        <span class="log-message"></span>
+      </div>
+    </template>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

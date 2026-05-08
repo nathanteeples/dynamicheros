@@ -1,0 +1,18 @@
+services:
+  hero-wall:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - TMDB_API_KEY=${TMDB_API_KEY:-}
+      - TMDB_BEARER_TOKEN=${TMDB_BEARER_TOKEN:-}
+      - APP_PORT=8080
+      - DATA_DIR=/app/data
+      - CACHE_DIR=/app/cache
+      - OUTPUT_DIR=/app/output
+      - DEFAULT_REGION=${DEFAULT_REGION:-US}
+    volumes:
+      - ./data:/app/data
+      - ./cache:/app/cache
+      - ./output:/app/output
+    restart: unless-stopped

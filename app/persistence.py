@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import json
+import threading
+from pathlib import Path
+
+from app.models import AppSettings, AppState, GlobalSettings, ServiceConfig
+from app.service_catalog import DEFAULT_SERVICE_DEFINITIONS
+
+
+class AppRepository:
+    def __init__(self, data_dir: Path, cache_dir: Path, output_dir: Path, default_region: str) -> None:
+        self.data_dir = data_dir
+        self.cache_dir = cache_dir
+        self.output_dir = output_dir
+        self.heroes_dir = output_dir / "heroes"
+        self.logs_dir = data_dir / "logs"
+        self.settings_path = data_dir / "settings.json"
+        self.state_path = data_dir / "state.json"
+        self.default_region = default_region.upper()
+        self._lock = threading.RLock()
+
+    def ensure_directories(self) -> None:
+        for path in (
+            self.data_dir,
+            self.cache_dir,
+            self.output_dir,
+            self.heroes_dir,
+            self.logs_dir,
+            self.cache_dir / "api",
+            self.cache_dir / "images",
+            self.cache_dir / "work",
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+
+    def build_default_settings(self) -> AppSettings:
+        global_settings = GlobalSettings(default_region=self.default_region)
+        defaults = global_settings.global_defaults
+        services = [
+            ServiceConfig(
+                slug=str(entry["slug"]),
+                name=str(entry["name"]),
+                provider_id=int(entry["provider_id"]),
+                region=self.default_region,
+                output_width=defaults.output_width,
+                output_height=defaults.output_height,
+                loop_duration_seconds=defaults.loop_duration_seconds,
+                fps=defaults.fps,
+                card_width=defaults.card_width,
+                gap=defaults.gap,
+                row_count=defaults.row_count,
+                corner_radius=defaults.corner_radius,
+                rotate_x=defaults.rotate_x,
+                rotate_y=defaults.rotate_y,
+                rotate_z=defaults.rotate_z,
+                zoom=defaults.zoom,
+                skew_x=defaults.skew_x,
+                skew_y=defaults.skew_y,
+                codec=defaults.codec,
+                quality_preset=defaults.quality_preset,
+                crf=defaults.crf,
+                cpu_used=defaults.cpu_used,
+                target_bitrate_kbps=defaults.target_bitrate_kbps,
+                max_titles=defaults.max_titles,
+                max_artwork_images=defaults.max_artwork_images,
+                minimum_usable_images=defaults.minimum_usable_images,
+                seed=defaults.seed,
+            )
+            for entry in DEFAULT_SERVICE_DEFINITIONS
+        ]
+        return AppSettings(global_settings=global_settings, services=services)
+
+    def load_settings(self) -> AppSettings:
+        with self._lock:
+            if not self.settings_path.exists():
+                settings = self.build_default_settings()
+                self.save_settings(settings)
+                return settings
+
+            data = json.loads(self.settings_path.read_text(encoding="utf-8"))
+            settings = AppSettings.model_validate(data)
+
+            existing = {service.slug: service for service in settings.services}
+            for entry in DEFAULT_SERVICE_DEFINITIONS:
+                slug = str(entry["slug"])
+                if slug in existing:
+                    continue
+                settings.services.append(
+                    ServiceConfig(
+                        slug=slug,
+                        name=str(entry["name"]),
+                        provider_id=int(entry["provider_id"]),
+                        region=settings.global_settings.default_region,
+                    )
+                )
+            settings.services.sort(key=lambda service: service.name.lower())
+            return settings
+
+    def save_settings(self, settings: AppSettings) -> None:
+        with self._lock:
+            self.settings_path.write_text(
+                json.dumps(settings.model_dump(mode="json"), indent=2),
+                encoding="utf-8",
+            )
+
+    def load_state(self) -> AppState:
+        with self._lock:
+            if not self.state_path.exists():
+                state = AppState()
+                self.save_state(state)
+                return state
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            return AppState.model_validate(data)
+
+    def save_state(self, state: AppState) -> None:
+        with self._lock:
+            self.state_path.write_text(
+                json.dumps(state.model_dump(mode="json"), indent=2),
+                encoding="utf-8",
+            )
