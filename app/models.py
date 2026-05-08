@@ -196,6 +196,8 @@ class ServiceState(BaseModel):
     slug: str
     status: JobStatus = "idle"
     preview_status: JobStatus = "idle"
+    preview_progress: float = 0.0
+    preview_message: str | None = None
     last_generated_at: datetime | None = None
     last_attempt_at: datetime | None = None
     last_failure_at: datetime | None = None

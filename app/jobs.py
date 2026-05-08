@@ -407,6 +407,8 @@ class GenerationManager:
         with self._job_lock:
             self._preview_inflight_slugs.add(slug)
             service_state.preview_status = "running"
+            service_state.preview_progress = 0.0
+            service_state.preview_message = "Starting preview generation"
             service_state.preview_last_error = None
             service_state.preview_updated_at = started_at
             self.repository.save_state(self.state)
@@ -423,24 +425,35 @@ class GenerationManager:
                 image_cache_dir=self.repository.cache_dir / "images",
                 global_settings=global_settings,
             )
-            titles, artworks = tmdb_client.collect_artworks(service, lambda _p, _m: None, self._preview_logger(slug))
+            def preview_progress(percent: float, message: str) -> None:
+                bounded = max(0.0, min(100.0, percent))
+                with self._job_lock:
+                    service_state.preview_status = "running"
+                    service_state.preview_progress = bounded
+                    service_state.preview_message = message
+                    service_state.preview_updated_at = utc_now()
+
+            preview_progress(0.0, "Starting preview generation")
+            titles, artworks = tmdb_client.collect_artworks(service, preview_progress, self._preview_logger(slug))
             if len(artworks) < service.minimum_usable_images:
                 raise RuntimeError(
                     f"Only {len(artworks)} artwork images found; minimum required is {service.minimum_usable_images}"
                 )
 
-            image_paths = tmdb_client.download_artworks(artworks, lambda _p, _m: None, self._preview_logger(slug))
+            image_paths = tmdb_client.download_artworks(artworks, preview_progress, self._preview_logger(slug))
             settings_hash = self._settings_hash(service)
             preview_seed = self._preferred_seed_for_render(service, service_state, settings_hash)
             render_result = self.renderer.render_preview(
                 service,
                 image_paths,
-                lambda _p, _m: None,
+                preview_progress,
                 self._preview_logger(slug),
                 seed_override=preview_seed,
             )
             completed_at = utc_now()
             service_state.preview_status = "succeeded"
+            service_state.preview_progress = 100.0
+            service_state.preview_message = "Preview generation finished"
             service_state.preview_generated_at = completed_at
             service_state.preview_last_error = None
             service_state.preview_seed_used = render_result.seed_used
@@ -465,6 +478,7 @@ class GenerationManager:
         except Exception as exc:
             failed_at = utc_now()
             service_state.preview_status = "failed"
+            service_state.preview_message = str(exc)
             service_state.preview_last_error = str(exc)
             service_state.preview_updated_at = failed_at
             self.repository.save_state(self.state)
@@ -479,6 +493,8 @@ class GenerationManager:
         return {
             "preview": {
                 "status": service_state.preview_status,
+                "progress": service_state.preview_progress,
+                "message": service_state.preview_message,
                 "generated_at": service_state.preview_generated_at.isoformat()
                 if service_state.preview_generated_at
                 else None,

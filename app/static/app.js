@@ -454,6 +454,12 @@ function renderServiceCard(servicePayload) {
   const draft = serviceView.draft;
   const progress = serviceView.job?.progress ?? (serviceView.state.status === "succeeded" ? 100 : 0);
   const progressMessage = serviceView.job?.message || serviceView.state.last_error || "Idle";
+  const previewProgress =
+    serviceView.state.preview_progress ?? (serviceView.state.preview_status === "succeeded" ? 100 : 0);
+  const previewMessage =
+    serviceView.state.preview_message ||
+    serviceView.state.preview_last_error ||
+    (serviceView.state.preview_status === "succeeded" ? "Preview ready" : "Preview idle");
   const advancedOpen = appState.detailSections.has(`advanced:${serviceView.slug}`) ? "open" : "";
   const previewBusy = appState.previewBusy.has(serviceView.slug);
   const renderBusy = Boolean(serviceView.job);
@@ -475,6 +481,15 @@ function renderServiceCard(servicePayload) {
           <button class="button button-primary" type="button" data-action="render" data-slug="${serviceView.slug}" ${renderBusy ? "disabled" : ""}>
             ${renderBusy ? "Rendering..." : "Save + render final"}
           </button>
+        </div>
+        <div>
+          <div class="status-line">
+            <strong>Preview ${formatProgress(previewProgress)}</strong>
+            <span class="status-note">${escapeHtml(previewMessage)}</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-bar" style="width: ${previewProgress}%;"></div>
+          </div>
         </div>
       </div>
 
@@ -859,6 +874,12 @@ function isUserEditing() {
   return active.matches("input, select, textarea");
 }
 
+function hasActiveBackendWork() {
+  const liveJobsRunning = appState.jobs.some((job) => job.status === "queued" || job.status === "running");
+  const previewsRunning = appState.services.some((service) => service.state?.preview_status === "running");
+  return liveJobsRunning || previewsRunning || appState.previewBusy.size > 0;
+}
+
 document.addEventListener("input", (event) => {
   const target = event.target;
   if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) return;
@@ -941,14 +962,16 @@ regenerateAllButton.addEventListener("click", async () => {
 
 async function init() {
   await refreshData({ preserveDraft: false });
-  window.setInterval(() => {
-    if (isUserEditing()) {
-      return;
+  const tick = async () => {
+    const delay = hasActiveBackendWork() ? 2000 : 10000;
+    if (!isUserEditing() || hasActiveBackendWork()) {
+      refreshData({ preserveDraft: true }).catch((error) => {
+        console.error(error);
+      });
     }
-    refreshData({ preserveDraft: true }).catch((error) => {
-      console.error(error);
-    });
-  }, 10000);
+    window.setTimeout(tick, delay);
+  };
+  window.setTimeout(tick, 2000);
 }
 
 init().catch((error) => {

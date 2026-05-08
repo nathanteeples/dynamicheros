@@ -85,6 +85,7 @@ class HeroRenderer:
         preview_service = self._preview_service(service)
         preview_video_path = self.preview_dir / f"{service.slug}.webm"
         preview_thumbnail_path = self.preview_dir / f"{service.slug}.jpg"
+        preview_clip_duration_seconds = max(4, min(8, service.loop_duration_seconds))
         return self._render_variant(
             service=preview_service,
             image_paths=image_paths,
@@ -94,6 +95,8 @@ class HeroRenderer:
             final_thumbnail_path=preview_thumbnail_path,
             minimum_output_size_bytes=8 * 1024,
             seed_override=seed_override,
+            output_duration_seconds=preview_clip_duration_seconds,
+            motion_loop_duration_seconds=service.loop_duration_seconds,
         )
 
     def _render_variant(
@@ -106,6 +109,8 @@ class HeroRenderer:
         final_thumbnail_path: Path,
         minimum_output_size_bytes: int,
         seed_override: int | None = None,
+        output_duration_seconds: int | None = None,
+        motion_loop_duration_seconds: int | None = None,
     ) -> RenderResult:
         if len(image_paths) < service.minimum_usable_images:
             raise RuntimeError(
@@ -137,7 +142,9 @@ class HeroRenderer:
         )
         phases = [rng.randrange(max(1, row.loop_width)) for row in row_layers]
 
-        frame_count = service.loop_duration_seconds * service.fps
+        output_duration = output_duration_seconds or service.loop_duration_seconds
+        motion_duration = motion_loop_duration_seconds or service.loop_duration_seconds
+        frame_count = output_duration * service.fps
         if frame_count <= 0:
             raise RuntimeError("Frame count must be greater than 0")
 
@@ -167,6 +174,7 @@ class HeroRenderer:
                     phases=phases,
                     frame_index=frame_index,
                     frame_count=frame_count,
+                    motion_duration_seconds=motion_duration,
                 )
                 if not thumbnail_written:
                     frame.save(temp_thumbnail_path, format="JPEG", quality=90, optimize=True)
@@ -208,7 +216,7 @@ class HeroRenderer:
                 thumbnail_path=final_thumbnail_path,
                 file_size_bytes=file_size,
                 thumbnail_size_bytes=thumbnail_size,
-                duration_seconds=service.loop_duration_seconds,
+                duration_seconds=output_duration,
                 frame_count=frame_count,
                 seed_used=seed_used,
                 ffmpeg_command=ffmpeg_command,
@@ -348,14 +356,16 @@ class HeroRenderer:
         phases: list[int],
         frame_index: int,
         frame_count: int,
+        motion_duration_seconds: int,
     ) -> Image.Image:
         scene = Image.new("RGBA", (scene_width, scene_height), (0, 0, 0, 255))
-        progress = frame_index / frame_count
+        elapsed_seconds = frame_index / max(1, service.fps)
+        motion_progress = elapsed_seconds / max(0.001, motion_duration_seconds)
 
         for row_index, row_layer in enumerate(row_layers):
             loop_width = row_layer.loop_width
             direction = 1 if row_index % 2 == 0 else -1
-            pixel_shift = int(round(progress * loop_width))
+            pixel_shift = int(round(motion_progress * loop_width))
             start_x = (phases[row_index] + (direction * pixel_shift)) % max(1, loop_width)
             row_view = row_layer.band.crop((start_x, 0, start_x + scene_width, row_layer.band.height))
             scene.paste(row_view, (0, row_layer.y), row_view)
