@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.jobs import GenerationManager, ServiceLogStore
-from app.models import AppSettings
+from app.models import AppSettings, PreviewRequest
 from app.persistence import AppRepository
 from app.rendering import HeroRenderer
 
@@ -102,6 +103,16 @@ async def regenerate_service(slug: str) -> dict:
     return {"job": job.model_dump(mode="json")}
 
 
+@app.post("/api/services/{slug}/preview")
+async def preview_service(slug: str, request: PreviewRequest) -> dict:
+    try:
+        return await asyncio.to_thread(manager.generate_preview_sync, slug, request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/api/regenerate-all")
 async def regenerate_all() -> dict:
     jobs = await manager.queue_all()
@@ -118,16 +129,18 @@ async def get_logs(slug: str | None = None, limit: int = 100) -> dict:
     return {"logs": manager.log_store.tail(slug=slug, limit=max(1, min(limit, 500)))}
 
 
-def _hero_file(slug: str, extension: str) -> Path:
+def _asset_file(slug: str, extension: str, asset_type: str) -> Path:
     service_slugs = {service.slug for service in repository.load_settings().services}
     if slug not in service_slugs:
         raise HTTPException(status_code=404, detail="Unknown service")
+    if asset_type == "preview":
+        return repository.previews_dir / f"{slug}.{extension}"
     return repository.heroes_dir / f"{slug}.{extension}"
 
 
 @app.get("/heroes/{slug}.webm")
 async def get_hero_video(slug: str) -> FileResponse:
-    path = _hero_file(slug, "webm")
+    path = _asset_file(slug, "webm", "hero")
     if not path.exists():
         raise HTTPException(status_code=404, detail="Hero video not generated yet")
     return FileResponse(path, media_type="video/webm", headers={"Cache-Control": "public, max-age=60, must-revalidate"})
@@ -135,7 +148,23 @@ async def get_hero_video(slug: str) -> FileResponse:
 
 @app.get("/heroes/{slug}.jpg")
 async def get_hero_thumbnail(slug: str) -> FileResponse:
-    path = _hero_file(slug, "jpg")
+    path = _asset_file(slug, "jpg", "hero")
     if not path.exists():
         raise HTTPException(status_code=404, detail="Hero thumbnail not generated yet")
     return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=60, must-revalidate"})
+
+
+@app.get("/previews/{slug}.webm")
+async def get_preview_video(slug: str) -> FileResponse:
+    path = _asset_file(slug, "webm", "preview")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Preview video not generated yet")
+    return FileResponse(path, media_type="video/webm", headers={"Cache-Control": "no-cache, must-revalidate"})
+
+
+@app.get("/previews/{slug}.jpg")
+async def get_preview_thumbnail(slug: str) -> FileResponse:
+    path = _asset_file(slug, "jpg", "preview")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Preview image not generated yet")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-cache, must-revalidate"})

@@ -1,16 +1,17 @@
 # Dynamic Heroes
 
-Dynamic Heroes is a locally hosted Docker app that generates and serves seamless looping WebM hero backgrounds for streaming services using TMDB artwork. Each service keeps a stable URL such as `/heroes/netflix.webm`, while the file behind that URL is regenerated on a configurable schedule.
+Dynamic Heroes is a locally hosted Docker app that generates and serves seamless looping WebM hero backgrounds for streaming services using TMDB artwork. Each service keeps a stable URL such as `/heroes/netflix.webm`, while the file behind that URL can be regenerated on demand or on a configurable schedule.
 
-The web dashboard always previews the exact generated WebM file that is being hosted. Rendering and encoding happen server-side with Pillow and `ffmpeg`, not in the browser.
+The web dashboard is manual-first by default. You can generate a lightweight draft preview clip before you commit to a full hosted WebM render, and automatic refresh stays off until you explicitly enable it.
 
 ## Features
 
 - Stable hosted WebM and thumbnail URLs per streaming service
+- Draft preview clips served from `/previews/<slug>.webm` before final render
 - Server-side TMDB fetching, image caching, rendering, and WebM encoding
 - Seamless horizontal row loops with pitch-based spacing math
 - Per-service controls for provider ID, region, content mode, refresh interval, loop duration, codec, CRF, transforms, and render density
-- Background scheduler with manual regenerate buttons and retry cooldowns
+- Background scheduler with opt-in global enable plus per-service auto-refresh toggles
 - Atomic output replacement so a failed render never removes the last working file
 - JSON-backed settings and state with no heavyweight database required
 - API endpoints for settings, services, jobs, logs, and hosted assets
@@ -35,7 +36,7 @@ docker compose up -d
 ```
 
 4. Open [http://localhost:8080](http://localhost:8080).
-5. Review settings, then click `Regenerate` on a service.
+5. Review settings, click `Preview current settings`, and then click `Save + render final` when the look is right.
 
 ## TMDB credentials
 
@@ -76,6 +77,11 @@ Examples:
 
 The URL stays fixed while the app atomically swaps in a newly generated file after each successful refresh.
 
+Preview assets are also available while you are tuning the look:
+
+- `/previews/<slug>.webm`
+- `/previews/<slug>.jpg`
+
 ## Rendering notes
 
 - The generator uses a black background.
@@ -94,6 +100,7 @@ Metadata and control:
 - `PUT /api/settings`
 - `GET /api/services`
 - `GET /api/services/:slug`
+- `POST /api/services/:slug/preview`
 - `POST /api/services/:slug/regenerate`
 - `POST /api/regenerate-all`
 - `GET /api/jobs`
@@ -108,6 +115,8 @@ Hosted assets:
 
 - `GET /heroes/:slug.webm`
 - `GET /heroes/:slug.jpg`
+- `GET /previews/:slug.webm`
+- `GET /previews/:slug.jpg`
 
 ## Files and persistence
 

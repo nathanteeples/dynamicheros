@@ -7,73 +7,54 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <div class="page-shell">
-      <header class="hero-header">
-        <div>
-          <p class="eyebrow">Local Docker Admin</p>
-          <h1>Dynamic streaming hero backgrounds</h1>
-          <p class="subtitle">
-            TMDB-powered seamless WebM loops with stable URLs, server-side rendering, and hosted previews from the real output files.
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="topbar-copy">
+          <p class="eyebrow">Dynamic Heroes</p>
+          <h1>Preview first. Render when ready.</h1>
+          <p class="subcopy">
+            Full WebM generation stays manual until you enable automatic refresh. Preview clips use the same server-side compositor before you commit to a production render.
           </p>
         </div>
-        <div class="header-actions">
-          <button id="refresh-button" class="secondary-button" type="button">Refresh</button>
-          <button id="regenerate-all-button" class="secondary-button" type="button">Regenerate all</button>
-          <button id="save-button" class="primary-button" type="button">Save settings</button>
+        <div class="topbar-actions">
+          <button id="refresh-button" class="button button-ghost" type="button">Refresh</button>
+          <button id="regenerate-all-button" class="button button-ghost" type="button">Render enabled services</button>
+          <button id="save-button" class="button button-primary" type="button">Save settings</button>
         </div>
       </header>
 
-      <section class="panel panel-grid">
-        <div>
-          <p class="panel-label">System status</p>
-          <div id="status-summary" class="status-summary"></div>
-        </div>
-        <div class="status-inline">
-          <div>
-            <p class="panel-label">Stable asset pattern</p>
-            <code>/heroes/&lt;service-slug&gt;.webm</code>
-          </div>
-          <div>
-            <p class="panel-label">Preview source</p>
-            <code>Exact generated WebM file</code>
-          </div>
-        </div>
+      <div id="flash-message" class="flash-message" hidden></div>
+
+      <section class="summary-panel">
+        <div id="status-summary" class="summary-grid"></div>
       </section>
 
       <section class="panel">
-        <div class="panel-heading">
+        <div class="panel-header">
           <div>
-            <p class="panel-label">Global settings</p>
-            <h2>TMDB, scheduler, and default render values</h2>
+            <p class="eyebrow">Global controls</p>
+            <h2>Scheduler and TMDB access</h2>
           </div>
-          <p class="panel-note">
-            Environment variables override stored TMDB credentials. Global defaults seed new service configs and act as a baseline reference while each service keeps its own editable values.
+          <p class="panel-copy">
+            Automatic refresh only runs when the global scheduler is on and a service has auto-refresh enabled.
           </p>
         </div>
-
-        <form id="global-settings-form" class="settings-grid"></form>
+        <form id="global-settings-form" class="global-form"></form>
       </section>
 
       <section class="panel">
-        <div class="panel-heading">
+        <div class="panel-header">
           <div>
-            <p class="panel-label">Service dashboard</p>
-            <h2>Generated hero loops</h2>
+            <p class="eyebrow">Services</p>
+            <h2>Draft preview and final render</h2>
           </div>
-          <p class="panel-note">
-            Each preview player below loads the same stable asset URL your downstream app will consume.
+          <p class="panel-copy">
+            Preview clips are lightweight draft renders. Live hero previews always point at the exact hosted WebM asset.
           </p>
         </div>
         <div id="services-grid" class="services-grid"></div>
       </section>
     </div>
-
-    <template id="log-line-template">
-      <div class="log-line">
-        <span class="log-time"></span>
-        <span class="log-message"></span>
-      </div>
-    </template>
 
     <script type="module" src="/static/app.js"></script>
   </body>

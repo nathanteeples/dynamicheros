@@ -14,6 +14,7 @@ class AppRepository:
         self.cache_dir = cache_dir
         self.output_dir = output_dir
         self.heroes_dir = output_dir / "heroes"
+        self.previews_dir = output_dir / "previews"
         self.logs_dir = data_dir / "logs"
         self.settings_path = data_dir / "settings.json"
         self.state_path = data_dir / "state.json"
@@ -26,6 +27,7 @@ class AppRepository:
             self.cache_dir,
             self.output_dir,
             self.heroes_dir,
+            self.previews_dir,
             self.logs_dir,
             self.cache_dir / "api",
             self.cache_dir / "images",
@@ -42,6 +44,7 @@ class AppRepository:
                 name=str(entry["name"]),
                 provider_id=int(entry["provider_id"]),
                 region=self.default_region,
+                auto_refresh_enabled=False,
                 output_width=defaults.output_width,
                 output_height=defaults.output_height,
                 loop_duration_seconds=defaults.loop_duration_seconds,
@@ -91,6 +94,7 @@ class AppRepository:
                         name=str(entry["name"]),
                         provider_id=int(entry["provider_id"]),
                         region=settings.global_settings.default_region,
+                        auto_refresh_enabled=False,
                     )
                 )
             settings.services.sort(key=lambda service: service.name.lower())

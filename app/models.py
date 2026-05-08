@@ -78,6 +78,7 @@ class ServiceConfig(RenderDefaults):
     slug: str
     name: str
     enabled: bool = True
+    auto_refresh_enabled: bool = False
     provider_id: int
     region: str = "US"
     content_mode: ContentMode = "mixed"
@@ -120,6 +121,7 @@ class GlobalSettings(BaseModel):
     tmdb_bearer_token: str | None = None
     default_region: str = "US"
     tmdb_language: str = "en-US"
+    scheduler_enabled: bool = False
     pages_per_media_type: int = 4
     api_cache_ttl_minutes: int = 360
     image_size: str = "w1280"
@@ -166,6 +168,13 @@ class AppSettings(BaseModel):
     services: list[ServiceConfig] = Field(default_factory=list)
 
 
+class PreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    global_settings: GlobalSettings
+    service: ServiceConfig
+
+
 class JobState(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -186,28 +195,42 @@ class ServiceState(BaseModel):
 
     slug: str
     status: JobStatus = "idle"
+    preview_status: JobStatus = "idle"
     last_generated_at: datetime | None = None
     last_attempt_at: datetime | None = None
     last_failure_at: datetime | None = None
+    preview_generated_at: datetime | None = None
     next_scheduled_at: datetime | None = None
     retry_after_at: datetime | None = None
     file_size_bytes: int | None = None
+    preview_file_size_bytes: int | None = None
     thumbnail_size_bytes: int | None = None
+    preview_thumbnail_size_bytes: int | None = None
     duration_seconds: int | None = None
+    preview_duration_seconds: int | None = None
     title_count: int | None = None
+    preview_title_count: int | None = None
     image_count: int | None = None
+    preview_image_count: int | None = None
     provider_id: int | None = None
     region: str | None = None
     output_width: int | None = None
     output_height: int | None = None
     seed_used: int | None = None
+    preview_seed_used: int | None = None
     output_path: str | None = None
     thumbnail_path: str | None = None
+    preview_output_path: str | None = None
+    preview_thumbnail_path: str | None = None
     settings_snapshot: dict[str, Any] = Field(default_factory=dict)
+    preview_settings_snapshot: dict[str, Any] = Field(default_factory=dict)
     encoding_stats: dict[str, Any] = Field(default_factory=dict)
     last_error: str | None = None
+    preview_last_error: str | None = None
+    preview_settings_hash: str | None = None
     last_job_id: str | None = None
     updated_at: datetime | None = None
+    preview_updated_at: datetime | None = None
 
 
 class AppState(BaseModel):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import threading
 import uuid
@@ -8,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from app.models import AppSettings, AppState, JobState, ServiceConfig, ServiceState
+from app.models import AppSettings, AppState, GlobalSettings, JobState, PreviewRequest, ServiceConfig, ServiceState
 from app.persistence import AppRepository
 from app.rendering import HeroRenderer
 from app.tmdb import TmdbClient
@@ -76,6 +77,7 @@ class GenerationManager:
         self._job_lock = threading.RLock()
         self._queue: asyncio.Queue[tuple[str, str, str]] = asyncio.Queue()
         self._inflight_slugs: set[str] = set()
+        self._preview_inflight_slugs: set[str] = set()
         self._worker_tasks: list[asyncio.Task[None]] = []
         self._scheduler_task: asyncio.Task[None] | None = None
         self._stopping = False
@@ -108,8 +110,10 @@ class GenerationManager:
         return self.settings
 
     async def _queue_startup_jobs(self) -> None:
+        if not self.settings.global_settings.scheduler_enabled:
+            return
         for service in self.settings.services:
-            if not service.enabled:
+            if not service.enabled or not service.auto_refresh_enabled:
                 continue
             output_path = self.repository.heroes_dir / f"{service.slug}.webm"
             if not output_path.exists():
@@ -164,8 +168,11 @@ class GenerationManager:
     async def _scheduler_loop(self) -> None:
         while not self._stopping:
             self.reload_settings()
+            if not self.settings.global_settings.scheduler_enabled:
+                await asyncio.sleep(self.settings.global_settings.scheduler_poll_seconds)
+                continue
             for service in self.settings.services:
-                if not service.enabled:
+                if not service.enabled or not service.auto_refresh_enabled:
                     continue
                 if service.slug in self._inflight_slugs:
                     continue
@@ -227,6 +234,7 @@ class GenerationManager:
         service = next(service for service in self.reload_settings().services if service.slug == slug)
         job = self.jobs[job_id]
         service_state = self._ensure_service_state(slug)
+        settings_hash = self._settings_hash(service)
         now = utc_now()
         job.status = "running"
         job.started_at = now
@@ -255,7 +263,7 @@ class GenerationManager:
         tmdb_client: TmdbClient | None = None
 
         try:
-            api_key, bearer_token = self._resolved_tmdb_credentials()
+            api_key, bearer_token = self._resolved_tmdb_credentials(self.settings.global_settings)
             tmdb_client = TmdbClient(
                 api_key=api_key,
                 bearer_token=bearer_token,
@@ -270,14 +278,23 @@ class GenerationManager:
                 )
 
             image_paths = tmdb_client.download_artworks(artworks, progress, log)
-            render_result = self.renderer.render(service, image_paths, progress, log)
+            render_result = self.renderer.render(
+                service,
+                image_paths,
+                progress,
+                log,
+                seed_override=self._preferred_seed_for_render(service, service_state, settings_hash),
+            )
             completed_at = utc_now()
+            next_scheduled = None
+            if self.settings.global_settings.scheduler_enabled and service.auto_refresh_enabled and service.enabled:
+                next_scheduled = completed_at + timedelta(minutes=service.refresh_interval_minutes)
 
             service_state.status = "succeeded"
             service_state.last_generated_at = completed_at
             service_state.last_failure_at = None
             service_state.retry_after_at = None
-            service_state.next_scheduled_at = completed_at + timedelta(minutes=service.refresh_interval_minutes)
+            service_state.next_scheduled_at = next_scheduled
             service_state.file_size_bytes = render_result.file_size_bytes
             service_state.thumbnail_size_bytes = render_result.thumbnail_size_bytes
             service_state.duration_seconds = render_result.duration_seconds
@@ -342,10 +359,147 @@ class GenerationManager:
             self.state.services[slug] = state
         return state
 
-    def _resolved_tmdb_credentials(self) -> tuple[str | None, str | None]:
-        api_key = self.env_api_key or self.settings.global_settings.tmdb_api_key
-        bearer_token = self.env_bearer_token or self.settings.global_settings.tmdb_bearer_token
+    def _resolved_tmdb_credentials(self, global_settings: GlobalSettings | None = None) -> tuple[str | None, str | None]:
+        active_settings = global_settings or self.settings.global_settings
+        api_key = self.env_api_key or active_settings.tmdb_api_key
+        bearer_token = self.env_bearer_token or active_settings.tmdb_bearer_token
         return api_key, bearer_token
+
+    def _settings_hash(self, service: ServiceConfig) -> str:
+        payload = json.dumps(service.model_dump(mode="json"), sort_keys=True)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _preferred_seed_for_render(
+        self,
+        service: ServiceConfig,
+        service_state: ServiceState,
+        settings_hash: str,
+    ) -> int | None:
+        if service.seed is not None:
+            return service.seed
+        if service_state.preview_settings_hash == settings_hash and service_state.preview_seed_used is not None:
+            return service_state.preview_seed_used
+        return None
+
+    def _effective_next_scheduled_at(self, service: ServiceConfig, state: ServiceState | None) -> datetime | None:
+        if not state:
+            return None
+        if not self.settings.global_settings.scheduler_enabled or not service.auto_refresh_enabled or not service.enabled:
+            return None
+        if state.next_scheduled_at is not None:
+            return state.next_scheduled_at
+        if state.last_generated_at is None:
+            return None
+        return state.last_generated_at + timedelta(minutes=service.refresh_interval_minutes)
+
+    def generate_preview_sync(self, slug: str, request: PreviewRequest) -> dict[str, Any]:
+        service = request.service
+        global_settings = request.global_settings
+        if service.slug != slug:
+            raise ValueError("Preview slug mismatch")
+
+        self.reload_settings()
+        if slug in self._inflight_slugs or slug in self._preview_inflight_slugs:
+            raise RuntimeError("This service is already rendering. Wait for the current job to finish.")
+
+        service_state = self._ensure_service_state(slug)
+        started_at = utc_now()
+        with self._job_lock:
+            self._preview_inflight_slugs.add(slug)
+            service_state.preview_status = "running"
+            service_state.preview_last_error = None
+            service_state.preview_updated_at = started_at
+            self.repository.save_state(self.state)
+
+        self.log_store.append(slug, "info", "Starting preview generation")
+        tmdb_client: TmdbClient | None = None
+
+        try:
+            api_key, bearer_token = self._resolved_tmdb_credentials(global_settings)
+            tmdb_client = TmdbClient(
+                api_key=api_key,
+                bearer_token=bearer_token,
+                cache_dir=self.repository.cache_dir / "api",
+                image_cache_dir=self.repository.cache_dir / "images",
+                global_settings=global_settings,
+            )
+            titles, artworks = tmdb_client.collect_artworks(service, lambda _p, _m: None, self._preview_logger(slug))
+            if len(artworks) < service.minimum_usable_images:
+                raise RuntimeError(
+                    f"Only {len(artworks)} artwork images found; minimum required is {service.minimum_usable_images}"
+                )
+
+            image_paths = tmdb_client.download_artworks(artworks, lambda _p, _m: None, self._preview_logger(slug))
+            settings_hash = self._settings_hash(service)
+            preview_seed = self._preferred_seed_for_render(service, service_state, settings_hash)
+            render_result = self.renderer.render_preview(
+                service,
+                image_paths,
+                lambda _p, _m: None,
+                self._preview_logger(slug),
+                seed_override=preview_seed,
+            )
+            completed_at = utc_now()
+            service_state.preview_status = "succeeded"
+            service_state.preview_generated_at = completed_at
+            service_state.preview_last_error = None
+            service_state.preview_seed_used = render_result.seed_used
+            service_state.preview_output_path = str(render_result.output_path)
+            service_state.preview_thumbnail_path = str(render_result.thumbnail_path)
+            service_state.preview_file_size_bytes = render_result.file_size_bytes
+            service_state.preview_thumbnail_size_bytes = render_result.thumbnail_size_bytes
+            service_state.preview_duration_seconds = render_result.duration_seconds
+            service_state.preview_title_count = len(titles)
+            service_state.preview_image_count = len(image_paths)
+            service_state.preview_settings_hash = settings_hash
+            service_state.preview_settings_snapshot = service.model_dump(mode="json")
+            service_state.preview_updated_at = completed_at
+            self.repository.save_state(self.state)
+            self.log_store.append(
+                slug,
+                "info",
+                "Preview generation finished",
+                output_path=str(render_result.output_path),
+                file_size_bytes=render_result.file_size_bytes,
+            )
+        except Exception as exc:
+            failed_at = utc_now()
+            service_state.preview_status = "failed"
+            service_state.preview_last_error = str(exc)
+            service_state.preview_updated_at = failed_at
+            self.repository.save_state(self.state)
+            self.log_store.append(slug, "error", "Preview generation failed", error=str(exc))
+            raise
+        finally:
+            if tmdb_client is not None:
+                tmdb_client.close()
+            with self._job_lock:
+                self._preview_inflight_slugs.discard(slug)
+
+        return {
+            "preview": {
+                "status": service_state.preview_status,
+                "generated_at": service_state.preview_generated_at.isoformat()
+                if service_state.preview_generated_at
+                else None,
+                "last_error": service_state.preview_last_error,
+                "seed_used": service_state.preview_seed_used,
+                "file_size_bytes": service_state.preview_file_size_bytes,
+                "duration_seconds": service_state.preview_duration_seconds,
+                "title_count": service_state.preview_title_count,
+                "image_count": service_state.preview_image_count,
+            },
+            "urls": {
+                "preview_video": f"/previews/{slug}.webm",
+                "preview_image": f"/previews/{slug}.jpg",
+            },
+        }
+
+    def _preview_logger(self, slug: str) -> Callable[[str], None]:
+        def log(message: str) -> None:
+            self.log_store.append(slug, "info", message, preview=True)
+
+        return log
 
     def list_jobs(self) -> list[JobState]:
         return sorted(self.jobs.values(), key=lambda job: job.queued_at, reverse=True)
@@ -365,15 +519,35 @@ class GenerationManager:
     def _service_payload(self, service: ServiceConfig, state: ServiceState | None) -> dict[str, Any]:
         output_path = self.repository.heroes_dir / f"{service.slug}.webm"
         thumbnail_path = self.repository.heroes_dir / f"{service.slug}.jpg"
+        preview_path = self.repository.previews_dir / f"{service.slug}.webm"
+        preview_thumbnail_path = self.repository.previews_dir / f"{service.slug}.jpg"
+        state_payload = None if state is None else state.model_dump(mode="json")
+        if state_payload is not None:
+            state_payload["next_scheduled_at"] = (
+                self._effective_next_scheduled_at(service, state).isoformat()
+                if self._effective_next_scheduled_at(service, state)
+                else None
+            )
         return {
             "slug": service.slug,
             "name": service.name,
             "settings": service.model_dump(mode="json"),
-            "state": None if state is None else state.model_dump(mode="json"),
+            "state": state_payload,
+            "automation": {
+                "scheduler_enabled": self.settings.global_settings.scheduler_enabled,
+                "auto_refresh_enabled": service.auto_refresh_enabled,
+                "automatic_generation_active": (
+                    self.settings.global_settings.scheduler_enabled and service.enabled and service.auto_refresh_enabled
+                ),
+            },
             "urls": {
                 "hero": f"/heroes/{service.slug}.webm",
                 "thumbnail": f"/heroes/{service.slug}.jpg",
+                "preview_video": f"/previews/{service.slug}.webm",
+                "preview_image": f"/previews/{service.slug}.jpg",
             },
             "file_exists": output_path.exists(),
             "thumbnail_exists": thumbnail_path.exists(),
+            "preview_exists": preview_path.exists(),
+            "preview_thumbnail_exists": preview_thumbnail_path.exists(),
         }

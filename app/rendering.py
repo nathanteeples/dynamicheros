@@ -41,7 +41,9 @@ class HeroRenderer:
     def __init__(self, cache_dir: Path, output_dir: Path, ffmpeg_binary: str = "ffmpeg") -> None:
         self.cache_dir = cache_dir
         self.output_dir = output_dir / "heroes"
+        self.preview_dir = output_dir / "previews"
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.preview_dir.mkdir(parents=True, exist_ok=True)
         self.ffmpeg_binary = ffmpeg_binary
 
     def render(
@@ -50,6 +52,53 @@ class HeroRenderer:
         image_paths: list[Path],
         progress: Callable[[float, str], None],
         log: Callable[[str], None],
+        seed_override: int | None = None,
+    ) -> RenderResult:
+        final_video_path = self.output_dir / f"{service.slug}.webm"
+        final_thumbnail_path = self.output_dir / f"{service.slug}.jpg"
+        return self._render_variant(
+            service=service,
+            image_paths=image_paths,
+            progress=progress,
+            log=log,
+            final_video_path=final_video_path,
+            final_thumbnail_path=final_thumbnail_path,
+            minimum_output_size_bytes=32 * 1024,
+            seed_override=seed_override,
+        )
+
+    def render_preview(
+        self,
+        service: ServiceConfig,
+        image_paths: list[Path],
+        progress: Callable[[float, str], None],
+        log: Callable[[str], None],
+        seed_override: int | None = None,
+    ) -> RenderResult:
+        preview_service = self._preview_service(service)
+        preview_video_path = self.preview_dir / f"{service.slug}.webm"
+        preview_thumbnail_path = self.preview_dir / f"{service.slug}.jpg"
+        return self._render_variant(
+            service=preview_service,
+            image_paths=image_paths,
+            progress=progress,
+            log=log,
+            final_video_path=preview_video_path,
+            final_thumbnail_path=preview_thumbnail_path,
+            minimum_output_size_bytes=8 * 1024,
+            seed_override=seed_override,
+        )
+
+    def _render_variant(
+        self,
+        service: ServiceConfig,
+        image_paths: list[Path],
+        progress: Callable[[float, str], None],
+        log: Callable[[str], None],
+        final_video_path: Path,
+        final_thumbnail_path: Path,
+        minimum_output_size_bytes: int,
+        seed_override: int | None = None,
     ) -> RenderResult:
         if len(image_paths) < service.minimum_usable_images:
             raise RuntimeError(
@@ -59,7 +108,7 @@ class HeroRenderer:
         started_at = time.perf_counter()
         card_width = service.card_width
         card_height = int(round(card_width * 9 / 16))
-        seed_used = service.seed if service.seed is not None else int(time.time() * 1000) % 2_147_483_647
+        seed_used = self._resolve_seed(service, seed_override)
         rng = random.Random(seed_used)
 
         work_dir = self.cache_dir / "work" / f"{service.slug}-{uuid.uuid4().hex}"
@@ -82,8 +131,6 @@ class HeroRenderer:
 
         temp_video_path = self.output_dir / f".{service.slug}.{uuid.uuid4().hex}.webm"
         temp_thumbnail_path = self.output_dir / f".{service.slug}.{uuid.uuid4().hex}.jpg"
-        final_video_path = self.output_dir / f"{service.slug}.webm"
-        final_thumbnail_path = self.output_dir / f"{service.slug}.jpg"
 
         crf = service.crf or QUALITY_PRESET_TO_CRF.get(service.quality_preset, 34)
         ffmpeg_command = self._ffmpeg_command(service, temp_video_path, crf)
@@ -133,7 +180,7 @@ class HeroRenderer:
                     f"ffmpeg failed with code {return_code}: {stderr_output.decode('utf-8', errors='replace')}"
                 )
 
-            if not temp_video_path.exists() or temp_video_path.stat().st_size < 32 * 1024:
+            if not temp_video_path.exists() or temp_video_path.stat().st_size < minimum_output_size_bytes:
                 raise RuntimeError("Generated WebM is missing or unexpectedly small")
 
             os.replace(temp_video_path, final_video_path)
@@ -164,6 +211,33 @@ class HeroRenderer:
                 temp_video_path.unlink(missing_ok=True)
             if temp_thumbnail_path.exists():
                 temp_thumbnail_path.unlink(missing_ok=True)
+
+    def _resolve_seed(self, service: ServiceConfig, seed_override: int | None) -> int:
+        if seed_override is not None:
+            return seed_override
+        if service.seed is not None:
+            return service.seed
+        return int(time.time() * 1000) % 2_147_483_647
+
+    def _preview_service(self, service: ServiceConfig) -> ServiceConfig:
+        preview_width = min(service.output_width, 960)
+        preview_height = max(1, int(round(preview_width * service.output_height / max(1, service.output_width))))
+        scale = preview_width / max(1, service.output_width)
+        preview_duration = max(4, min(10, service.loop_duration_seconds))
+        preview_fps = max(12, min(18, service.fps))
+
+        return service.model_copy(
+            update={
+                "output_width": preview_width,
+                "output_height": preview_height,
+                "loop_duration_seconds": preview_duration,
+                "fps": preview_fps,
+                "card_width": max(120, int(round(service.card_width * scale))),
+                "gap": max(0, int(round(service.gap * scale))),
+                "corner_radius": max(0, int(round(service.corner_radius * scale))),
+                "cpu_used": min(8, max(service.cpu_used, 5)),
+            }
+        )
 
     def _prepare_tile(self, image_path: Path, card_width: int, card_height: int, corner_radius: int) -> Image.Image:
         with Image.open(image_path) as image:
